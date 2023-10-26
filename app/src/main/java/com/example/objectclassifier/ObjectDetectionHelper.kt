@@ -2,6 +2,7 @@ package com.example.objectclassifier
 
 import android.graphics.RectF
 import org.tensorflow.lite.Interpreter
+import org.tensorflow.lite.support.image.TensorImage
 
 class ObjectDetectionHelper(private val tflite: Interpreter, private val labels: List<String>) {
 
@@ -30,7 +31,20 @@ class ObjectDetectionHelper(private val tflite: Interpreter, private val labels:
             // SSD Mobilenet V1 Model assumes class 0 is background class
             // in label file and class labels start from 1 to number_of_classes + 1,
             // while outputClasses correspond to class index from 0 to number_of_classes
+            label = labels[1 + labelIndices[0][it].toInt()],
+
+            // Score is a single value of [0,1]
+            score = scores[0][it]
         )
+    }
+
+    fun predict(image: TensorImage): List<ObjectPrediction> {
+        tflite.runForMultipleInputsOutputs(arrayOf(image.buffer), outputBuffer)
+        return predictions
+    }
+
+    companion object {
+        const val OBJECT_COUNT = 10
     }
 
 }

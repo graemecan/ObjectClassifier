@@ -1,18 +1,23 @@
 package com.example.objectclassifier
 
 import android.annotation.SuppressLint
+import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Matrix
+import android.graphics.RectF
 import android.os.Bundle
 import android.util.Log
 import android.util.Size
 import android.view.View
+import android.view.ViewGroup
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.AspectRatio
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
 import com.example.objectclassifier.databinding.ActivityMainBinding
@@ -21,13 +26,14 @@ import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.nnapi.NnApiDelegate
 import org.tensorflow.lite.support.common.FileUtil
 import org.tensorflow.lite.support.common.ops.NormalizeOp
-import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ImageProcessor
+import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ops.ResizeOp
 import org.tensorflow.lite.support.image.ops.ResizeWithCropOrPadOp
 import org.tensorflow.lite.support.image.ops.Rot90Op
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import kotlin.math.min
 import kotlin.random.Random
 
 class MainActivity : AppCompatActivity() {
@@ -221,5 +227,115 @@ class MainActivity : AppCompatActivity() {
         prediction: ObjectDetectionHelper.ObjectPrediction?
     ) = activityMainBinding.viewFinder.post {
 
+        // Early exit: if prediction is not good enough, don't report it
+        if (prediction == null || prediction.score < ACCURACY_THRESHOLD) {
+            activityMainBinding.boxPrediction.visibility = View.GONE
+            activityMainBinding.textPrediction.visibility = View.GONE
+            return@post
+        }
+
+        // Location has to be mapped to our local coordinates
+        val location = mapOutputCoordinates(prediction.location)
+
+        // Update the text and UI
+        activityMainBinding.textPrediction.text = "${"%.2f".format(prediction.score)} ${prediction.label}"
+        (activityMainBinding.boxPrediction.layoutParams as ViewGroup.MarginLayoutParams).apply {
+            topMargin = location.top.toInt()
+            leftMargin = location.left.toInt()
+            width = min(activityMainBinding.viewFinder.width, location.right.toInt() - location.left.toInt())
+            height = min(activityMainBinding.viewFinder.height, location.bottom.toInt() - location.top.toInt())
+        }
+
+        // Make sure all UI elements are visible
+        activityMainBinding.boxPrediction.visibility = View.VISIBLE
+        activityMainBinding.textPrediction.visibility = View.VISIBLE
+    }
+
+    /**
+     * Helper function used to map the coordinates for objects coming out of
+     * the model into the coordinates that the user sees on the screen.
+     */
+    private fun mapOutputCoordinates(location: RectF): RectF {
+
+        // Step 1: map location to the preview coordinates
+        val previewLocation = RectF(
+            location.left * activityMainBinding.viewFinder.width,
+            location.top * activityMainBinding.viewFinder.height,
+            location.right * activityMainBinding.viewFinder.width,
+            location.bottom * activityMainBinding.viewFinder.height
+        )
+
+        // Step 2: compensate for camera sensor orientation and mirroring
+        val isFrontFacing = lensFacing == CameraSelector.LENS_FACING_FRONT
+        val correctedLocation = if (isFrontFacing) {
+            RectF(
+                activityMainBinding.viewFinder.width - previewLocation.right,
+                previewLocation.top,
+                activityMainBinding.viewFinder.width - previewLocation.left,
+                previewLocation.bottom
+            )
+        } else {
+            previewLocation
+        }
+
+        // Step 3: compensate for 1:1 to 4:3 aspect ratio conversion + small margin
+        val margin = 0.1f
+        val requestedRatio = 4f / 3f
+        val midX = (correctedLocation.left + correctedLocation.right) / 2f
+        val midY = (correctedLocation.top + correctedLocation.bottom) / 2f
+        return if (activityMainBinding.viewFinder.width < activityMainBinding.viewFinder.height) {
+            RectF(
+                midX - (1f + margin) * requestedRatio * correctedLocation.width() / 2f,
+                midY - (1f - margin) * correctedLocation.height() / 2f,
+                midX + (1f + margin) * requestedRatio * correctedLocation.width() / 2f,
+                midY + (1f - margin) * correctedLocation.height() / 2f
+            )
+        } else {
+            RectF(
+                midX - (1f - margin) * correctedLocation.width() / 2f,
+                midY - (1f + margin) * requestedRatio * correctedLocation.height() / 2f,
+                midX + (1f - margin) * correctedLocation.width() / 2f,
+                midY + (1f - margin) * requestedRatio * correctedLocation.height() / 2f
+            )
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+
+        // Request permissions each time the app resumes, since they can be revoked at any time
+        if (!hasPermissions(this)) {
+            ActivityCompat.requestPermissions(
+                this, permissions.toTypedArray(), permissionsRequestCode
+            )
+        } else {
+            bindCameraUseCases()
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == permissionsRequestCode && hasPermissions(this)) {
+            bindCameraUseCases()
+        } else {
+            finish()
+        }
+    }
+
+    /** Convenience method used to check if all permissions required by this app are granted */
+    private fun hasPermissions(context: Context) = permissions.all {
+        ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+    }
+
+    companion object {
+        private val TAG = MainActivity::class.java.simpleName
+
+        private const val ACCURACY_THRESHOLD = 0.5f
+        private const val MODEL_PATH = "coco_ssd_mobilenet_v1_1.0_quant.tflite"
+        private const val LABELS_PATH = "coco_ssd_modilenet_v1_1.0_labels.txt"
     }
 }
